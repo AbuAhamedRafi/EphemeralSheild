@@ -1,0 +1,53 @@
+# =============================================================================
+# EphemeralShield — Pre-commit Hook Configuration
+# =============================================================================
+# Pre-commit hooks run automatically before every git commit.
+# They catch formatting issues, lint errors, and accidental secret commits
+# BEFORE code reaches the repository.
+#
+# Install hooks: uv run pre-commit install
+# Run manually:  uv run pre-commit run --all-files
+# =============================================================================
+
+repos:
+  # ---------------------------------------------------------------------------
+  # Standard hooks — basic file hygiene
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace      # Remove trailing whitespace
+      - id: end-of-file-fixer        # Ensure files end with a newline
+      - id: check-yaml               # Validate YAML syntax
+      - id: check-toml               # Validate TOML syntax
+      - id: check-added-large-files  # Prevent accidentally committing large files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict     # Detect leftover merge conflict markers
+      - id: debug-statements         # Detect forgotten breakpoint() calls
+
+  # ---------------------------------------------------------------------------
+  # Ruff — Lint + Format in one pass
+  # ---------------------------------------------------------------------------
+  # WHY Ruff in pre-commit? It's fast enough to run on every commit (< 1s)
+  # and catches import ordering, unused variables, and style issues.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff           # Lint
+        args: [--fix]
+      - id: ruff-format    # Format
+
+  # ---------------------------------------------------------------------------
+  # Secret detection — CRITICAL security hook
+  # ---------------------------------------------------------------------------
+  # Scans for patterns that look like API keys, passwords, private keys, etc.
+  # This is your last line of defense before secrets reach Git history.
+  # Once a secret is in Git history, it's compromised even if you delete it.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: '(\.lock|\.example)$'

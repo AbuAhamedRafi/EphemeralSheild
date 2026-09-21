@@ -1,0 +1,55 @@
+# =============================================================================
+# EphemeralShield — .dockerignore
+# =============================================================================
+# Controls what files Docker copies into the build context.
+# Excluding unnecessary files makes builds faster and images smaller.
+# More importantly, it prevents secrets from leaking into container layers.
+# =============================================================================
+
+# Git history (huge, not needed in image)
+.git
+.gitignore
+
+# Development files
+.venv/
+venv/
+.uv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Tests (not needed in production image)
+tests/
+
+# Documentation (not needed in production image)
+docs/
+*.md
+!README.md
+
+# Secrets — CRITICAL: never bake secrets into Docker images
+# They become extractable from image layers even if deleted later.
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# CI/CD
+.github/
+
+# Examples and scripts (development only)
+examples/
+scripts/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,1 @@
+"""EphemeralShield — Infrastructure package."""

@@ -1,0 +1,286 @@
+# =============================================================================
+# EphemeralShield — Docker Compose (Development)
+# =============================================================================
+# This file defines the COMPLETE local development environment.
+# Every service runs in Docker — no need to install PostgreSQL or Redis locally.
+#
+# Architecture:
+#   ┌──────────────────────────────────────────────────────┐
+#   │                 Docker Network                       │
+#   │  ephemeralshield-dev (bridge)                        │
+#   │                                                      │
+#   │  ┌─────────┐  ┌──────────────┐  ┌───────────────┐   │
+#   │  │  redis   │  │  broker-db   │  │ test-target-db│   │
+#   │  │  :6379   │  │  :5432       │  │  :5432        │   │
+#   │  └─────────┘  └──────────────┘  └───────────────┘   │
+#   │       │              │                  │            │
+#   │       └──────────────┼──────────────────┘            │
+#   │                      │                               │
+#   │               ┌──────┴───────┐                       │
+#   │               │     api      │                       │
+#   │               │   :8000      │                       │
+#   │               └──────────────┘                       │
+#   └──────────────────────────────────────────────────────┘
+#           │              │                │
+#     127.0.0.1:6379  127.0.0.1:5433  127.0.0.1:5434
+#       (host)          (host)          (host)
+#
+# Port mapping strategy:
+#   - broker-db:      5433 on host (not 5432, to avoid conflicts with local PG)
+#   - test-target-db: 5434 on host
+#   - redis:          6379 on host
+#   - api:            8000 on host
+#   All bound to 127.0.0.1 (loopback only) — never exposed to the network.
+#
+# Usage:
+#   docker compose -f deploy/compose.dev.yaml up -d --build --wait
+#   docker compose -f deploy/compose.dev.yaml down
+#   docker compose -f deploy/compose.dev.yaml logs -f api
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # broker-db — Control-Plane Database (PostgreSQL 17)
+  # ---------------------------------------------------------------------------
+  # This is EphemeralShield's OWN database. It stores:
+  #   - Lease records, access requests, audit trail
+  #   - Principals, groups, policies
+  #   - Worker heartbeats, work items
+  #
+  # WHY a separate database from the target?
+  #   Security isolation. If the target is compromised, the attacker shouldn't
+  #   be able to read/modify the broker's lease records or audit chain.
+  #   The plan (§1.5.2) explicitly requires this separation.
+  #
+  # WHY PostgreSQL 17?
+  #   Latest stable release. The plan suggested PG 18 but it's in beta —
+  #   using it for the data store we can't afford to lose is risky. (ADR-002)
+  # ---------------------------------------------------------------------------
+  broker-db:
+    image: postgres:17-alpine
+    container_name: ephemeralshield-broker-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${BROKER_DB_USER:-ephemeralshield}
+      POSTGRES_PASSWORD: ${BROKER_DB_PASSWORD:-ephemeralshield_dev}
+      POSTGRES_DB: ${BROKER_DB_NAME:-ephemeralshield}
+      # Recommended PostgreSQL tuning for development
+      POSTGRES_INITDB_ARGS: "--auth-local=scram-sha-256 --auth-host=scram-sha-256"
+
+    ports:
+      # 127.0.0.1 binding = only accessible from your machine, not the network
+      # 5433 on host maps to 5432 inside the container
+      - "127.0.0.1:5433:5432"
+
+    volumes:
+      # Named volume — data persists across container restarts
+      # Use 'docker compose -f deploy/compose.dev.yaml down -v' to destroy
+      - broker-db-data:/var/lib/postgresql/data
+      # Initialization scripts run on FIRST start only (when volume is empty)
+      - ./init/broker-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+
+    healthcheck:
+      # pg_isready checks if PostgreSQL is accepting connections
+      # WHY not just check the port? A TCP connection might succeed before
+      # PostgreSQL has finished recovery or loaded shared_preload_libraries.
+      test: ["CMD-SHELL", "pg_isready -U ${BROKER_DB_USER:-ephemeralshield} -d ${BROKER_DB_NAME:-ephemeralshield}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - ephemeralshield-dev
+
+  # ---------------------------------------------------------------------------
+  # test-target-db — Disposable Test Target (PostgreSQL 17)
+  # ---------------------------------------------------------------------------
+  # Simulates a production database that teams want to access.
+  # Seeded with synthetic data (customers, orders, payments).
+  #
+  # WHY a separate instance?
+  #   The plan (§1.5.3) requires destructive tests (DROP ROLE, session
+  #   termination) to run ONLY against a disposable instance. Your real
+  #   target-db must never be touched by automated tests.
+  #
+  # WHY same PostgreSQL version as broker-db?
+  #   User specified PostgreSQL 17 for all instances. This ensures the
+  #   target adapter code is tested against the same version it'll face
+  #   in production.
+  # ---------------------------------------------------------------------------
+  test-target-db:
+    image: postgres:17-alpine
+    container_name: ephemeralshield-test-target-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${TEST_TARGET_DB_USER:-target_admin}
+      POSTGRES_PASSWORD: ${TEST_TARGET_DB_PASSWORD:-target_dev_password}
+      POSTGRES_DB: ${TEST_TARGET_DB_NAME:-target_app}
+      POSTGRES_INITDB_ARGS: "--auth-local=scram-sha-256 --auth-host=scram-sha-256"
+
+    ports:
+      - "127.0.0.1:5434:5432"
+
+    volumes:
+      - test-target-db-data:/var/lib/postgresql/data
+      # Seed synthetic data on first start
+      - ./init/test-target-seed.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TEST_TARGET_DB_USER:-target_admin} -d ${TEST_TARGET_DB_NAME:-target_app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - ephemeralshield-dev
+
+  # ---------------------------------------------------------------------------
+  # redis — Optional Acceleration Cache
+  # ---------------------------------------------------------------------------
+  # Used for:
+  #   - Expiry hint notifications (keyspace events)
+  #   - Caching policy evaluation results
+  #   - Worker coordination hints
+  #
+  # IMPORTANT: Redis is NEVER the authoritative store.
+  # If Redis goes down, PostgreSQL scanning still handles all expirations.
+  # This is a deliberate design choice from §1.2.4: "Expiration notifications
+  # can be lost or delayed, so correctness cannot depend on them."
+  #
+  # WHY redis:7-alpine?
+  #   Alpine variant is ~10MB vs ~120MB. Redis 7 supports ACLs and
+  #   improved keyspace notifications.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ephemeralshield-redis
+    restart: unless-stopped
+
+    # Enable keyspace event notifications for expired keys
+    # K = Keyspace events, Ex = Expired events
+    # This lets Redis notify the worker when a cached lease expires
+    command: redis-server --notify-keyspace-events KEx --maxmemory 128mb --maxmemory-policy allkeys-lru
+
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    volumes:
+      - redis-data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+    networks:
+      - ephemeralshield-dev
+
+  # ---------------------------------------------------------------------------
+  # api — EphemeralShield API Server
+  # ---------------------------------------------------------------------------
+  # The FastAPI application that handles credential requests, lease management,
+  # and audit queries.
+  #
+  # WHY volume mount src/?
+  #   In development, we mount the source code so Uvicorn's --reload flag
+  #   picks up code changes instantly without rebuilding the Docker image.
+  #   In production (compose.prod.yaml), source is baked into the image.
+  #
+  # WHY depends_on with condition: service_healthy?
+  #   Without health checks, Docker starts containers in dependency order
+  #   but doesn't wait for them to be READY. The API would crash trying to
+  #   connect to a PostgreSQL that's still initializing.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: ephemeralshield-api
+    restart: unless-stopped
+
+    # Override the production CMD for development:
+    # --reload: Watch for file changes and restart automatically
+    # --reload-dir: Only watch the source directory (not migrations, tests, etc.)
+    command: >
+      uvicorn ephemeralshield.api.app:create_app
+      --factory
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/src
+
+    environment:
+      # Inside Docker network, services use container names as hostnames.
+      # 'broker-db' resolves to the broker-db container's IP address.
+      BROKER_DB_URL: postgresql+psycopg://ephemeralshield:${BROKER_DB_PASSWORD:-ephemeralshield_dev}@broker-db:5432/${BROKER_DB_NAME:-ephemeralshield}
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8000"
+      # Lease defaults
+      LEASE_DEFAULT_TTL_SECONDS: "1800"
+      LEASE_MAX_TTL_SECONDS: "7200"
+      # Test target connection info (for integration tests)
+      TEST_TARGET_DB_HOST: test-target-db
+      TEST_TARGET_DB_PORT: "5432"
+      TEST_TARGET_DB_USER: ${TEST_TARGET_DB_USER:-target_admin}
+      TEST_TARGET_DB_PASSWORD: ${TEST_TARGET_DB_PASSWORD:-target_dev_password}
+      TEST_TARGET_DB_NAME: ${TEST_TARGET_DB_NAME:-target_app}
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      # Mount source code for hot-reload during development
+      - ../src:/app/src:ro
+      - ../migrations:/app/migrations:ro
+
+    depends_on:
+      broker-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      # Hit the liveness endpoint to verify the API is responding
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    networks:
+      - ephemeralshield-dev
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+# Named volumes persist data across container restarts.
+# Anonymous volumes (no name) are lost when the container is removed.
+# To destroy all data: docker compose -f deploy/compose.dev.yaml down -v
+# =============================================================================
+volumes:
+  broker-db-data:
+    name: ephemeralshield-broker-db-data
+  test-target-db-data:
+    name: ephemeralshield-test-target-db-data
+  redis-data:
+    name: ephemeralshield-redis-data
+
+# =============================================================================
+# Networks
+# =============================================================================
+# A dedicated bridge network so containers can find each other by name.
+# Docker's default bridge network doesn't support container name DNS.
+# =============================================================================
+networks:
+  ephemeralshield-dev:
+    name: ephemeralshield-dev
+    driver: bridge

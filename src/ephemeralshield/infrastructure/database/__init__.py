@@ -1,0 +1,1 @@
+"""EphemeralShield — Database infrastructure package."""

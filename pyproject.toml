@@ -1,0 +1,225 @@
+# =============================================================================
+# EphemeralShield — pyproject.toml
+# =============================================================================
+# This is the single source of truth for project metadata, dependencies, and
+# tool configuration. We use pyproject.toml (PEP 621) instead of setup.py
+# because it's the modern standard, declarative, and supported by uv/pip/hatch.
+#
+# WHY uv? It's 10-100x faster than pip for dependency resolution and installs.
+# It also produces a deterministic lockfile (uv.lock) that guarantees every
+# developer and CI run uses the exact same dependency versions.
+# =============================================================================
+
+[build-system]
+# Hatchling is a lightweight, standards-compliant build backend.
+# We use it because uv recommends it and it handles src-layout natively.
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ephemeralshield"
+version = "0.1.0"
+description = "PostgreSQL just-in-time credential broker — provision short-lived, read-only database credentials on demand with automatic revocation and tamper-evident audit."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+authors = [{ name = "EphemeralShield Contributors" }]
+keywords = ["postgresql", "zero-trust", "jit-access", "security", "fastapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Database",
+]
+
+# ---------------------------------------------------------------------------
+# Runtime Dependencies
+# ---------------------------------------------------------------------------
+# Each dependency is chosen for a specific architectural reason:
+#
+# FastAPI + Uvicorn:     Async HTTP API framework + ASGI server
+# SQLAlchemy[asyncio]:   Async ORM for control-plane database (broker-db)
+# psycopg[binary]:       PostgreSQL driver — Psycopg 3 with async support
+#                        Used for BOTH SQLAlchemy and direct target operations
+# Pydantic v2:           Data validation (FastAPI uses it internally too)
+# pydantic-settings:     Type-safe configuration from env vars / .env files
+# Typer:                 CLI framework (builds shieldctl and shield-admin)
+# HTTPX:                 Async HTTP client for CLI → API communication
+# cryptography:          Ed25519 signing for audit chain checkpoints
+# redis[hiredis]:        Async Redis client with C parser for performance
+#                        Redis is OPTIONAL — PostgreSQL remains authoritative
+# alembic:               Database migration management
+# ---------------------------------------------------------------------------
+dependencies = [
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.32.0,<1.0.0",
+    "sqlalchemy[asyncio]>=2.0.35,<3.0.0",
+    "psycopg[binary]>=3.2.0,<4.0.0",
+    "pydantic>=2.9.0,<3.0.0",
+    "pydantic-settings>=2.5.0,<3.0.0",
+    "typer>=0.13.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "cryptography>=43.0.0,<45.0.0",
+    "redis[hiredis]>=5.1.0,<6.0.0",
+    "alembic>=1.13.0,<2.0.0",
+]
+
+# ---------------------------------------------------------------------------
+# CLI Entry Points
+# ---------------------------------------------------------------------------
+# These create executable commands when the package is installed:
+#   shieldctl   — End-user CLI (request access, connect, revoke)
+#   shield-admin — Operator CLI (manage resources, policies, audit)
+# ---------------------------------------------------------------------------
+[project.scripts]
+shieldctl = "ephemeralshield.cli.main:app"
+shield-admin = "ephemeralshield.admin.main:app"
+
+# ---------------------------------------------------------------------------
+# Development Dependencies
+# ---------------------------------------------------------------------------
+# Separated from runtime deps so production images stay lean.
+# ---------------------------------------------------------------------------
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+    "pytest-asyncio>=0.24.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",          # For TestClient async testing
+    "ruff>=0.7.0,<1.0.0",            # Linter + formatter (replaces black+isort+flake8)
+    "mypy>=1.12.0,<2.0.0",           # Static type checker in strict mode
+    "coverage[toml]>=7.6.0,<8.0.0",  # Test coverage measurement
+    "import-linter>=2.1,<3.0.0",     # Enforces dependency direction rules
+    "bandit>=1.8.0,<2.0.0",          # Security-focused static analysis
+    "pip-audit>=2.7.0,<3.0.0",       # Known vulnerability scanning
+    "pre-commit>=4.0.0,<5.0.0",      # Git hook management
+]
+
+# ---------------------------------------------------------------------------
+# Hatchling Build Configuration
+# ---------------------------------------------------------------------------
+# src-layout: source code lives under src/ so you can't accidentally import
+# from the repo root instead of the installed package. This catches packaging
+# bugs early.
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/ephemeralshield"]
+
+# ---------------------------------------------------------------------------
+# Ruff — Linter + Formatter
+# ---------------------------------------------------------------------------
+# WHY Ruff? It replaces Black, isort, flake8, pyflakes, and pycodestyle in a
+# single tool that runs in milliseconds. Written in Rust.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort (import sorting)
+    "N",    # pep8-naming
+    "UP",   # pyupgrade (modernize syntax)
+    "B",    # flake8-bugbear (common bugs)
+    "S",    # flake8-bandit (security)
+    "T20",  # flake8-print (no print() in production)
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific rules
+]
+ignore = [
+    "S101",  # Allow assert in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S106"]  # Allow assert and hardcoded passwords in tests
+
+# ---------------------------------------------------------------------------
+# mypy — Static Type Checker
+# ---------------------------------------------------------------------------
+# Strict mode catches type errors before they become runtime bugs.
+# We explicitly configure plugins for Pydantic (model validation) and
+# SQLAlchemy (ORM query types).
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "redis.*"
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+# asyncio_mode = "auto" means we don't need @pytest.mark.asyncio on every
+# async test — pytest-asyncio handles it automatically.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["ephemeralshield"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ ==",
+]
+
+# ---------------------------------------------------------------------------
+# import-linter
+# ---------------------------------------------------------------------------
+# Enforces the dependency direction from the development plan (§1.4):
+#   domain → (nothing)
+#   application → domain
+#   infrastructure → domain, application
+#   api/worker/cli → application
+# This prevents architectural drift where, say, a domain class imports
+# SQLAlchemy or a route contains raw SQL.
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_packages = ["ephemeralshield"]
+
+[[tool.importlinter.contracts]]
+name = "Domain has no framework imports"
+type = "forbidden"
+source_modules = ["ephemeralshield.domain"]
+forbidden_modules = [
+    "sqlalchemy",
+    "fastapi",
+    "redis",
+    "psycopg",
+    "uvicorn",
+    "typer",
+    "httpx",
+    "alembic",
+]
+
+[[tool.importlinter.contracts]]
+name = "Application depends only on domain"
+type = "layers"
+layers = [
+    "ephemeralshield.api",
+    "ephemeralshield.application",
+    "ephemeralshield.domain",
+]
