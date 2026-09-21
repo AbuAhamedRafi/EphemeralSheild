@@ -1,5 +1,5 @@
 """
-EphemeralShield — Alembic Migration Environment.
+EphemeralShield - Alembic Migration Environment.
 
 This file configures how Alembic runs migrations against the control-plane
 database (broker-db).
@@ -18,13 +18,18 @@ KEY DESIGN DECISIONS:
    about our ORM models. When you run `alembic revision --autogenerate`,
    Alembic compares the models to the database and generates migration code.
 
-4. NO create_all(): The development plan (§1.4) explicitly prohibits using
+4. NO create_all(): The development plan (1.4) explicitly prohibits using
    SQLAlchemy's create_all() in production. All schema changes go through
    versioned, reviewable Alembic migrations.
+
+5. WINDOWS COMPATIBILITY: Psycopg 3 requires SelectorEventLoop on Windows
+   because ProactorEventLoop does not support the necessary socket operations
+   for async PostgreSQL connections.
 """
 
 import asyncio
 from logging.config import fileConfig
+import sys
 
 from alembic import context
 from sqlalchemy import pool
@@ -34,7 +39,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from ephemeralshield.infrastructure.database.engine import Base
 from ephemeralshield.settings import get_settings
 
-# Alembic Config object — provides access to alembic.ini values
+# Alembic Config object - provides access to alembic.ini values
 config = context.config
 
 # Set up Python logging from alembic.ini's [loggers] section
@@ -117,9 +122,12 @@ def run_migrations_online() -> None:
     """
     Run migrations in 'online' mode (connected to the database).
 
-    This is the normal path — Alembic connects to the database and applies
+    This is the normal path - Alembic connects to the database and applies
     migrations directly.
     """
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     asyncio.run(run_async_migrations())
 
 

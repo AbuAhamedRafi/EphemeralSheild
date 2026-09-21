@@ -64,8 +64,7 @@ class Settings(BaseSettings):
     # Control-plane database (broker-db)
     # -------------------------------------------------------------------------
     broker_db_url: str = (
-        "postgresql+psycopg://ephemeralshield:ephemeralshield_dev"
-        "@broker-db:5432/ephemeralshield"
+        "postgresql+psycopg://ephemeralshield:ephemeralshield_dev@broker-db:5432/ephemeralshield"
     )
 
     # -------------------------------------------------------------------------

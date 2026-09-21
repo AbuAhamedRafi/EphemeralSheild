@@ -104,10 +104,7 @@ class TestSettingsSecretRedaction:
             test_target_db_password="super_secret_password",  # type: ignore[arg-type]
             _env_file=None,  # type: ignore[call-arg]
         )
-        assert (
-            settings.test_target_db_password.get_secret_value()
-            == "super_secret_password"
-        )
+        assert settings.test_target_db_password.get_secret_value() == "super_secret_password"
 
 
 class TestSettingsEnvironmentOverride:
